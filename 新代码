@@ -1,0 +1,173 @@
+import os
+import joblib
+import numpy as np
+import pandas as pd
+from sklearn.datasets import fetch_california_housing
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+from flask import Flask, render_template_string, request, jsonify
+
+# ===================== 配置项 =====================
+MODEL_PATH = "house_price_model.pkl"
+SCALER_PATH = "scaler.pkl"
+FEATURE_NAMES = [
+    "MedInc",
+    "HouseAge",
+    "AveRooms",
+    "AveBedrms",
+    "Population",
+    "AveOccup",
+    "Latitude",
+    "Longitude"
+]
+
+# 全局变量，存放模型和标准化器
+model = None
+scaler = None
+
+# ===================== 函数 =====================
+def load_and_process_data():
+    from sklearn.datasets import make_regression
+    X_raw, y_raw = make_regression(
+        n_samples=20000, n_features=8, noise=15, random_state=42
+    )
+    df = pd.DataFrame(X_raw, columns=FEATURE_NAMES)
+    df["MedHouseVal"] = y_raw / 10  # 缩放数值，模拟房价区间
+
+    X = df.drop("MedHouseVal", axis=1)
+    y = df["MedHouseVal"]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    scaler_local = StandardScaler()
+    X_train_scaled = scaler_local.fit_transform(X_train)
+    X_test_scaled = scaler_local.transform(X_test)
+    return X_train_scaled, X_test_scaled, y_train, y_test, scaler_local
+def train_model():
+    print("开始训练模型...")
+    X_train, X_test, y_train, y_test, scaler_local = load_and_process_data()
+
+    model_local = RandomForestRegressor(
+        n_estimators=100, max_depth=10, random_state=42, n_jobs=-1
+    )
+    model_local.fit(X_train, y_train)
+
+    y_pred = model_local.predict(X_test)
+    mse = mean_squared_error(y_test, y_pred)
+    r2 = r2_score(y_test, y_pred)
+    print(f"训练完成 | MSE: {mse:.4f} | R²: {r2:.4f}")
+
+    joblib.dump(model_local, MODEL_PATH)
+    joblib.dump(scaler_local, SCALER_PATH)
+    print("模型已保存到当前目录")
+    return model_local, scaler_local
+
+def load_model():
+    global model, scaler
+    if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
+        model = joblib.load(MODEL_PATH)
+        scaler = joblib.load(SCALER_PATH)
+        print("已加载本地模型")
+    else:
+        model, scaler = train_model()
+
+def predict_price(features):
+    global model, scaler
+    features_array = np.array(features).reshape(1, -1)
+    features_scaled = scaler.transform(features_array)
+    prediction = model.predict(features_scaled)[0]
+    return round(prediction * 100000, 2)
+
+# ===================== Web 界面 =====================
+app = Flask(__name__)
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>房价预测系统</title>
+    <style>
+        body { font-family: Arial; max-width: 600px; margin: 50px auto; padding: 20px; }
+        h1 { text-align: center; color: #2563eb; }
+        .form-group { margin: 12px 0; }
+        label { display: block; margin-bottom: 4px; font-weight: bold; }
+        input { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        button { width: 100%; background: #2563eb; color: white; padding: 12px;
+                 border: none; border-radius: 5px; cursor: pointer; font-size: 16px; margin-top: 10px; }
+        .result { margin-top: 20px; padding: 18px; background: #f0fdf4;
+                  border-radius: 8px; font-size: 22px; color: #166534; text-align: center; }
+    </style>
+</head>
+<body>
+    <h1>🏠 房价预测系统</h1>
+    <form method="POST">
+        <div class="form-group">
+            <label>MedInc 收入（万元）</label>
+            <input type="number" step="any" name="MedInc" value="8.3252" required>
+        </div>
+        <div class="form-group">
+            <label>HouseAge 房屋年龄</label>
+            <input type="number" step="any" name="HouseAge" value="41" required>
+        </div>
+        <div class="form-group">
+            <label>AveRooms 平均房间数</label>
+            <input type="number" step="any" name="AveRooms" value="6.9841" required>
+        </div>
+        <div class="form-group">
+            <label>AveBedrms 平均卧室数</label>
+            <input type="number" step="any" name="AveBedrms" value="1.0238" required>
+        </div>
+        <div class="form-group">
+            <label>Population 街区人口</label>
+            <input type="number" step="any" name="Population" value="322" required>
+        </div>
+        <div class="form-group">
+            <label>AveOccup 平均入住人数</label>
+            <input type="number" step="any" name="AveOccup" value="2.5556" required>
+        </div>
+        <div class="form-group">
+            <label>Latitude 纬度</label>
+            <input type="number" step="any" name="Latitude" value="37.88" required>
+        </div>
+        <div class="form-group">
+            <label>Longitude 经度</label>
+            <input type="number" step="any" name="Longitude" value="-122.23" required>
+        </div>
+        <button type="submit">开始预测</button>
+    </form>
+    {% if result %}
+    <div class="result">
+        预测房价：${{ result }}
+    </div>
+    {% endif %}
+</body>
+</html>
+"""
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    result = None
+    if request.method == "POST":
+        features = [float(request.form[name]) for name in FEATURE_NAMES]
+        result = predict_price(features)
+    return render_template_string(HTML_TEMPLATE, result=result)
+
+@app.route("/api/predict", methods=["POST"])
+def api_predict():
+    data = request.json
+    features = data.get("features", [])
+    if len(features) != 8:
+        return jsonify({"error": "需要传入8个特征值"}), 400
+    price = predict_price(features)
+    return jsonify({"predicted_price": price})
+
+# ===================== 程序入口 =====================
+if __name__ == "__main__":
+    load_model()
+    print("服务启动成功，访问 http://localhost:5000 使用")
+    app.run(debug=True, host="0.0.0.0", port=5000)
